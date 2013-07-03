@@ -4,18 +4,19 @@
 - gets load testing orders & performs them
 - sends back the results in real time.
 """
-import os
-import errno
-import time
-import sys
-import traceback
 import argparse
-import logging
-import threading
-import random
-import json
+import errno
 import functools
+import json
+import logging
+import os
+import psutil
+import random
 import subprocess
+import sys
+import threading
+import time
+import traceback
 from multiprocessing import Process
 
 import zmq.green as zmq
@@ -102,19 +103,16 @@ class Agent(object):
         args['worker_id'] = os.getpid()
         try:
             if args.get('test_runner', None) is not None:
-                built_args = ' '.join(['--%s %s' % (key, value)
-                                      for (key, value)
-                                      in args.items()]).split()
-                test_runner_args = map(str, [args['test_runner']] + built_args)
-                p = subprocess.call(test_runner_args)
+                p = Process(target=functools.partial(
+                    launch_multiple_runners, args))
             else:
                 p = Process(target=functools.partial(run, args))
-                p.start()
+            p.start()
         except Exception, e:
             msg = 'Failed to start process ' + str(e)
             raise ExecutionError(msg)
 
-        self._processes[p.pid] = p
+        self._processes[p.pid] = psutil.Process(p.pid)
         return p.pid
 
     def handle(self, message):
@@ -131,7 +129,7 @@ class Agent(object):
             status = {}
 
             for pid, proc in self._processes.items():
-                if proc.is_alive():
+                if proc.is_running():
                     status[pid] = 'running'
                 else:
                     status[pid] = 'terminated'
@@ -141,7 +139,7 @@ class Agent(object):
             status = {}
 
             for pid, proc in self._processes.items():
-                if proc.is_alive():
+                if proc.is_running():
                     proc.terminate()
                     del self._processes[pid]
                 status[pid] = 'terminated'
@@ -152,7 +150,7 @@ class Agent(object):
 
     def _check_proc(self):
         for pid, proc in self._processes.items():
-            if not proc.is_alive():
+            if not proc.is_running():
                 del self._processes[pid]
 
     def _handle_recv_back(self, msg):
@@ -342,6 +340,24 @@ def main(args=sys.argv):
 
     return 0
 
+
+def launch_multiple_runners(args):
+    # XXX support multiple cycles / users
+    nb_runs = args['users'][0] * args['cycles'][0]
+
+    args['test_runner'] = (
+            'node_modules/.bin/mocha R spec --recursive --timeout 15000 '
+            'test/integration/hello.js --reporter loads')
+    pids = []
+    for x in range(nb_runs):
+        loads_status = ','.join(map(str, (args['cycles'][0], args['users'][0],
+                                          x + 1, 1)))
+        env = os.environ.copy()
+        env['LOADS_WORKER_ID'] = str(args.get('worker_id'))
+        env['LOADS_STATUS'] = loads_status
+        pids.append(subprocess.Popen(args['test_runner'].split(' '),
+                    cwd='/home/alexis/dev/github.com/picl-server/',
+                    env=env))
 
 if __name__ == '__main__':
     main()
